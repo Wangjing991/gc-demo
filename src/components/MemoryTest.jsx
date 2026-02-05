@@ -34,7 +34,7 @@ function MemoryTest() {
 
   useInterval(
     () => {
-      setIntervalCount(c => c + 1);
+      // setIntervalCount(c => c + 1);
     },
     isIntervalActive ? 1000 : null
   );

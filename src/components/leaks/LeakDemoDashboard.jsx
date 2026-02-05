@@ -20,7 +20,7 @@ function LeakDemoDashboard() {
       <EventListenerLeakDemo />
       <TimerLeakDemo />
       <DomReferenceLeakDemo /> 
-      {/* <UseMemoizedFnLeakDemo /> */}
+      <UseMemoizedFnLeakDemo />
     </div>
   );
 }
