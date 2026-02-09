@@ -1,10 +1,12 @@
-import LeakDemoDashboard from './components/leaks/LeakDemoDashboard'
+import ReactMemoryTest from './components/ReactMemoryTest'
+import WorldMarketMap from './components/WorldMarketMap'
 import './App.css'
 
 function App() {
   return (
     <div className="app">
-      <LeakDemoDashboard />
+      <WorldMarketMap />
+      <ReactMemoryTest />
     </div>
   )
 }

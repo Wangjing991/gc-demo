@@ -2,13 +2,124 @@
 
 ## 目录
 
-1. [内存管理基础](#内存管理基础)
-2. [垃圾回收机制](#垃圾回收机制)
-3. [内存泄露](#内存泄露)
-4. [React 中的内存管理](#react-中的内存管理)
-5. [ahooks 与内存管理](#ahooks-与内存管理)
-6. [内存调试与监控](#内存调试与监控)
-7. [最佳实践](#最佳实践)
+1. [浏览器内存使用与架构概览](#浏览器内存使用与架构概览)
+2. [内存管理基础](#内存管理基础)
+3. [垃圾回收机制](#垃圾回收机制)
+4. [内存泄露](#内存泄露)
+5. [React 中的内存管理](#react-中的内存管理)
+6. [ahooks 与内存管理](#ahooks-与内存管理)
+7. [内存调试与监控](#内存调试与监控)
+8. [最佳实践](#最佳实践)
+
+---
+
+## 浏览器内存使用与架构概览
+
+浏览器整体视角介绍内存是如何被划分和使用的，有助于理解后面 JS/React 的内存行为。
+
+### 1. 进程与线程模型
+
+现代浏览器（如 Chrome、Edge）通常采用多进程架构：
+
+- **浏览器进程**：负责标签管理、地址栏、书签等 UI
+- **渲染进程（Renderer Process）**：每个标签页通常一个，用于渲染页面（HTML/CSS/JS）
+- **GPU 进程**：负责 GPU 加速绘制
+- **网络进程**：负责网络请求
+- **插件/扩展进程**：负责插件或扩展的执行
+
+我们关心的 JS 内存，主要在**渲染进程**中。
+
+### 2. 渲染进程中的内存组成
+
+渲染进程内部大致可以分为：
+
+- **JavaScript 堆（JS Heap）**：由 JS 引擎（如 V8）管理，存放 JS 对象、函数、闭包等
+- **调用栈（Call Stack）**：记录函数调用链
+- **浏览器对象模型（BOM）与文档对象模型（DOM）相关内存**：
+  - DOM 树节点（Element、Text 等）
+  - CSSOM（CSS 对象模型）
+  - Layout / Paint 缓存数据
+- **图形与媒体资源**：
+  - 图片（Image、Canvas 位图）
+  - 视频解码缓冲区
+  - 字体渲染缓存
+
+JS 可以通过引用 DOM 节点、Image 对象、Canvas 等间接“抓住”大量非 JS 堆上的内存，因此：
+
+- 即使 JS 对象本身很小，只要它引用了大的 DOM 或媒体资源，也会影响整体内存
+
+### 3. JS 堆与 DOM 的关系
+
+可以简单理解为：
+
+- **JS 堆**：由 JS 引擎管理，对象通过 GC 回收
+- **DOM / 其他浏览器对象**：由浏览器内核管理，通常在以下情况下释放：
+  - DOM 节点从文档树中移除且没有 JS 引用
+  - 图片/视频等资源不再被任何对象引用
+
+典型场景：
+
+```javascript
+// JS 持有 DOM 引用
+const div = document.getElementById('root');
+
+// 即使 DOM 从文档中移除，只要 JS 还持有引用，内存也无法完全释放
+document.body.removeChild(div); // DOM 树中移除
+// 但 div 仍然在 JS 变量中有引用
+```
+
+要完全释放：
+
+```javascript
+// 方法1：让变量超出作用域（推荐）
+function processDOM() {
+  const div = document.getElementById('root');
+  document.body.removeChild(div);
+  // 函数执行完后，div 变量超出作用域，如果没有其他引用，DOM 会被 GC
+}
+
+// 方法2：显式设置为 null（如果必须在外部作用域）
+let div = document.getElementById('root');
+document.body.removeChild(div);
+div = null; // 断开引用
+```
+
+### 4. 页面的生命周期与内存
+
+一个页面的大致生命周期：
+
+1. **加载（Load）**：
+   - 分配 JS 堆、构建 DOM/CSSOM、加载图片/脚本
+2. **运行（Interaction）**：
+   - 用户交互、事件处理、动画、网络请求
+3. **卸载（Unload / Close）**：
+   - 标签页关闭或导航到新页面
+   - 渲染进程可能被销毁或复用
+
+当标签页关闭且渲染进程被销毁时：
+
+- 该进程的所有内存（JS 堆、DOM、图片等）都会被操作系统整体回收
+
+在同一标签页内“单页应用（SPA）”的场景下：
+
+- JS 代码会长时间常驻
+- 如果不主动清理引用（事件、定时器、缓存），即使页面路由切换，内存也不会自动释放
+- 这也是前端应用最常见的内存泄露来源
+
+### 5. GC 触发时机（浏览器层面）
+
+浏览器不会在每次对象变为不可达的瞬间就立刻回收，而是根据策略触发 GC：
+
+- **内存压力较大时**
+- **空闲时间段（Idle Time）**
+- **某些阈值达到时（如堆大小超过一定比例）**
+
+这意味着：
+
+- 即使你已经把引用清理干净，内存占用在 DevTools 上也不会“瞬间”回落
+- 需要结合时间维度（Performance/Memory 录制）来综合判断是否存在泄露
+
+> 后面的章节会从 JS 层、React 层分别展开，更细致地讲解 GC 算法和内存泄露场景。
 
 ---
 
@@ -26,16 +137,21 @@ JavaScript 内存管理遵循以下生命周期：
 
 JavaScript 中的内存主要分为两类：
 
-- **栈内存（Stack）**：存储基本类型（Number, String, Boolean, null, undefined, Symbol, BigInt）和对象引用
-- **堆内存（Heap）**：存储对象、数组、函数等复杂数据结构
+- **栈内存（Stack）**：存储基本类型（Number, Boolean, null, undefined, Symbol, BigInt）和对象引用
+  - **注意**：字符串（String）的实际内容存储在堆内存中，栈上只存储引用
+- **堆内存（Heap）**：存储对象、数组、函数、字符串内容等复杂数据结构
 
 ```javascript
-// 栈内存：基本类型
-let num = 42;
-let str = "hello";
+// 栈内存：小值基本类型和对象引用
+let num = 42;           // 数字直接存储在栈上
+let bool = true;        // 布尔值存储在栈上
+let ref = null;         // null/undefined 存储在栈上
 
-// 堆内存：对象
-let obj = { name: "test", data: [1, 2, 3] };
+// 堆内存：对象、数组、函数、字符串内容
+let obj = { name: "test", data: [1, 2, 3] };  // 对象存储在堆上
+let str = "hello";      // 字符串内容在堆上，栈上存储引用
+let arr = [1, 2, 3];    // 数组存储在堆上
+let fn = function() {}; // 函数存储在堆上
 ```
 
 ---
@@ -264,8 +380,8 @@ function Component() {
 }
 
 // ❌ 错误：将函数保存到 ref 中，且不清理
-const functionsRef = useRef([]);
 function Component() {
+  const functionsRef = useRef([]); // ref 应该在组件内部定义
   const handleClick = () => {
     console.log('clicked');
   };
@@ -661,6 +777,8 @@ React 组件在卸载时会自动清理，但需要注意：
 
 #### 1. useEffect 清理函数
 
+**重要**：`useEffect` 的依赖数组非常重要，它决定了 effect 何时重新执行和清理函数何时被调用。
+
 ```javascript
 // setInterval 示例
 useEffect(() => {
@@ -669,10 +787,13 @@ useEffect(() => {
   }, 1000);
   
   // ✅ 必须返回清理函数
+  // 清理函数会在：
+  // 1. 组件卸载时执行
+  // 2. 依赖项变化导致 effect 重新执行前执行
   return () => {
     clearInterval(timer);
   };
-}, []);
+}, []); // 空依赖数组：只在组件挂载时执行一次，卸载时清理
 
 // setTimeout 示例
 useEffect(() => {
@@ -685,7 +806,18 @@ useEffect(() => {
   return () => {
     clearTimeout(timer);
   };
-}, []);
+}, []); // 空依赖数组
+
+// ⚠️ 注意：如果依赖数组不为空，effect 会在依赖变化时重新执行
+useEffect(() => {
+  const timer = setTimeout(() => {
+    setState(newValue);
+  }, 1000);
+  
+  return () => {
+    clearTimeout(timer); // 每次依赖变化时，先清理旧的 timer
+  };
+}, [someDependency]); // 依赖变化时，先执行清理函数，再执行新的 effect
 ```
 
 #### 2. 事件监听器清理
@@ -719,80 +851,6 @@ useEffect(() => {
   };
 }, []);
 ```
-
-### React Hooks 内存管理
-
-#### useState
-
-```javascript
-// ✅ 正确：状态会在组件卸载时自动清理
-const [data, setData] = useState([]);
-```
-
-#### useRef
-
-```javascript
-// ⚠️ 注意：ref.current 指向的值不会自动被设置为 null
-// 但组件卸载时，ref 对象本身会被清理，如果没有其他引用，ref.current 指向的对象也会被 GC
-const dataRef = useRef(null);
-dataRef.current = new Array(1000000).fill(0);
-
-// ✅ 通常不需要手动清理：组件卸载时，ref 对象被清理，如果没有其他引用，对象会被 GC
-// 手动设置为 null 通常不是必须的
-
-// ⚠️ 但在以下情况下，手动清理可能有用：
-// 1. 对象很大，想更快触发 GC（虽然通常不是必须的）
-// 2. 代码可读性：明确表示释放引用
-// 3. 对象可能被其他引用持有（这种情况下必须清理）
-useEffect(() => {
-  return () => {
-    dataRef.current = null; // 可选：明确释放引用
-  };
-}, []);
-
-// ✅ 如果 ref.current 指向的对象没有其他引用，可以不手动清理
-// 组件卸载时，ref 对象被清理，如果没有其他引用，对象会被 GC
-const smallDataRef = useRef(null);
-smallDataRef.current = { count: 0 };
-```
-
-**说明**：
-- `useRef` 返回的对象在组件卸载时会被清理
-- 如果 `ref.current` 指向的对象没有其他引用，会被 GC，**通常不需要手动设置为 null**
-- 手动设置为 `null` 主要是为了：
-  - 代码可读性（明确表示释放）
-  - 对于非常大的对象，可能有助于更快触发 GC（但通常不是必须的）
-- **必须手动清理的情况**：如果 `ref.current` 被其他引用持有（如保存在全局变量、模块级变量中），则需要手动清理
-
-#### useMemo / useCallback
-
-```javascript
-// ✅ 正确：依赖变化时会重新计算
-// 旧值是否会被 GC 取决于是否有其他引用
-const memoizedValue = useMemo(() => {
-  return expensiveCalculation(data);
-}, [data]);
-// 如果 memoizedValue 的旧值没有被其他引用，会被 GC
-
-const memoizedCallback = useCallback(() => {
-  doSomething(a, b);
-}, [a, b]);
-// 如果 memoizedCallback 的旧值没有被其他引用，会被 GC
-
-// ⚠️ 注意：如果旧值被其他引用保存，不会被 GC
-const savedValues = [];
-const memoizedValue2 = useMemo(() => {
-  const value = expensiveCalculation(data);
-  savedValues.push(value); // ❌ 错误：保存引用，导致无法被 GC
-  return value;
-}, [data]);
-```
-
-**说明**：
-- `useMemo` 和 `useCallback` 在依赖变化时会重新计算
-- 旧值是否会被 GC 取决于是否有其他引用
-- 如果旧值没有被其他引用，会被 GC
-- 如果旧值被保存到外部引用（全局变量、ref 等），不会被 GC
 
 ---
 
@@ -889,8 +947,8 @@ function Component() {
 }
 
 // ❌ 错误：将函数保存到 ref 中，且不断累积
-const functionsRef = useRef([]);
 function Component() {
+  const functionsRef = useRef([]); // ref 应该在组件内部定义
   const handleClick = useMemoizedFn(() => {
     console.log('clicked');
   });
@@ -963,13 +1021,19 @@ function Component() {
 
 ```javascript
 // ✅ 只引用需要的数据，避免闭包持有大对象
-const bigData = useRef(new Array(1000000).fill(0));
-const dataLength = useRef(bigData.current.length);
-
-const handleAction = useMemoizedFn((id) => {
-  // 只引用基本类型，不引用大对象
-  console.log(dataLength.current);
-});
+function Component() {
+  const bigData = useRef(new Array(1000000).fill(0));
+  // 注意：useRef 的初始值只在第一次渲染时使用
+  // 如果需要在 bigData 变化时更新 dataLength，应该使用 useState 或 useEffect
+  const [dataLength] = useState(() => bigData.current.length);
+  
+  const handleAction = useMemoizedFn((id) => {
+    // 只引用基本类型，不引用大对象
+    console.log(dataLength);
+  });
+  
+  return <button onClick={() => handleAction('test')}>Click</button>;
+}
 ```
 
 ---
@@ -1380,9 +1444,9 @@ function commitDeletion(finishedRoot, node) {
 
 ### 源码位置参考
 
-React 源码中与内存管理相关的主要文件：
+React 源码中与内存管理相关的主要文件（基于 React 18+）：
 
-1. **`packages/react-reconciler/src/ReactFiberCommitWork.js`**
+1. **`packages/react-reconciler/src/ReactFiberCommitWork.js`** 或 **`ReactFiberCommitEffects.js`**
    - `commitPassiveEffectCleanups` - 执行 useEffect 清理函数
    - `commitDeletion` - 删除 Fiber 节点
    - `commitUnmountRef` - 清理 Ref
@@ -1391,8 +1455,10 @@ React 源码中与内存管理相关的主要文件：
    - Hook 链表的管理
    - `unmountHooks` - 卸载 Hooks
 
-3. **`packages/react-dom/src/client/ReactDOMComponent.js`**
-   - DOM 节点的创建和删除
+3. **`packages/react-dom/src/client/ReactDOMHostConfig.js`** 或相关文件
+   - DOM 节点的创建和删除（React 18 使用新的 Host Config API）
+
+**注意**：React 源码结构在不同版本可能有所不同，建议查看对应版本的源码。
 
 ### 垃圾回收的触发条件
 
